@@ -1,0 +1,230 @@
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import scipy
+from tqdm import tqdm
+
+#### Def Architecure
+Input_dim = 1                 # Network input dimension
+Output_dim = 1                # Network output dimension
+Legendre_order = 3            # Order of Legendre polynomial
+D_val = 50                    # Dataset size ; D
+N_min = 100                    # Lowest network width, N
+N_max = 500                    # Greatest network width ; N
+N_spacing = 100                # Spacing for network widths
+batch = D_val                 # Batch  size
+Ensemble_size = 20             # Ensemble size
+Epochs = 50000                  # Total number of epochs to train
+Spacing = 1000                 #
+dist_mean = 0
+dist_variance = 1
+loss_val = 0.01
+
+tf.keras.backend.set_floatx('float64')
+
+#### Get Data
+tf.random.set_seed(100)
+
+x_train = tf.random.uniform((D_val, Input_dim),-1, 1)
+y_train = scipy.special.eval_legendre(Legendre_order, x_train) + tf.random.uniform(x_train.shape,-1, 1)/50
+
+data_train = tf.data.Dataset.from_tensor_slices((x_train, y_train)).batch(batch)
+
+x_test = tf.random.uniform((D_val, Input_dim),-1, 1)
+y_test = scipy.special.eval_legendre(Legendre_order, x_test)
+
+data_test = tf.data.Dataset.from_tensor_slices((x_test, y_test))
+
+
+def get_model_rescaled_variance(width, Seed):
+
+    loss_fn = tf.keras.losses.MeanSquaredError()
+    opt = tf.keras.optimizers.SGD(learning_rate = 0.001, momentum = 0.0)
+
+    loss_metric = tf.keras.metrics.Mean()
+    accuracy = tf.keras.metrics.MeanSquaredError()
+
+    loss_test = tf.keras.metrics.Mean()
+    accuracy_test = tf.keras.metrics.MeanSquaredError()
+
+
+    initializer = tf.keras.initializers.RandomNormal(mean = dist_mean, 
+                                                     stddev = np.sqrt(dist_variance),
+                                                     seed = tf.keras.random.SeedGenerator(Seed)
+                                                     )
+    
+    initializer2 = tf.keras.initializers.RandomNormal(mean = dist_mean, 
+                                                     stddev = np.sqrt(dist_variance/width),
+                                                     seed = tf.keras.random.SeedGenerator(Seed+1))
+                                                     
+
+
+    model = tf.keras.models.Sequential()
+    model.add(tf.keras.layers.Dense(width,
+                                    input_shape = (Input_dim, ), 
+                                    activation="relu", 
+                                    kernel_initializer = initializer, # tf.keras.initializers.LecunNormal(seed = tf.keras.random.SeedGenerator(1))
+                                    dtype = tf.float64
+                                    ))
+
+    model.add(tf.keras.layers.Dense(Output_dim,
+                                    input_shape = (width, ),
+                                    activation = None,
+                                    kernel_initializer = initializer2, #  tf.keras.initializers.LecunNormal(seed = tf.keras.random.SeedGenerator(2))
+                                    dtype = tf.float64
+                                    ))
+    
+    return model, loss_fn, opt, loss_metric, loss_test
+
+
+def NTK_regression(model, x, width):
+
+        with tf.GradientTape(persistent=True) as tape:
+            y = model(x)
+
+        grad = tape.jacobian(y, model.trainable_weights)
+
+        grad_new = []
+        for i in range(len(grad)):
+            grad_new.append(tf.squeeze(grad[i]))     
+        grad_new[-1] = tf.expand_dims(grad_new[-1], axis = 1)
+        
+        grad = np.array(tf.concat(grad_new, 1))
+
+        Kernel = grad@(grad.T)
+        Kernel = Kernel/width
+
+        if scipy.linalg.issymmetric(Kernel) == False:
+            raise ValueError("Kernel is not symmetric") 
+
+        norm = np.linalg.norm(Kernel)
+        eigvals, eigvects = scipy.linalg.eigh(Kernel)
+
+        ind = np.flip(np.argsort(eigvals))
+
+        eigvects = eigvects[ind]
+        eigvals = np.flip(np.sort(eigvals))
+    
+        return eigvals, norm, eigvects, Kernel
+
+def train_loop(Epochs, width, seed, rescaling):
+    
+    seed = int(seed)
+
+    if rescaling == "Variance":
+        model, loss_fn, opt, loss_metric, loss_test = get_model_rescaled_variance(width, seed)
+
+    else:
+        raise ValueError("rescaling must be set to Variance or Weights")
+
+    spectrum_list = []
+    loss_list_test = []
+    loss_list_train = []
+    norm_list = []
+    eigvects_list = []
+
+    @tf.function
+    def test(x_test, y_test):
+        output = model(x_test, training = False)
+        test_loss = loss_fn(y_test, output)
+
+        loss_test(test_loss)
+
+    @tf.function
+    def train(x_train, y_train):
+        with tf.GradientTape() as g:
+            pred = model(x_train, training = True)
+            loss = loss_fn(y_train, pred)
+        
+        grad = g.gradient(loss, model.trainable_variables)
+        opt.apply_gradients(zip(grad, model.trainable_variables))
+
+        loss_metric(loss)  
+
+    H_list = []
+
+    for (x_train, y_train) in data_train:
+            print('Init')
+
+    eig, norm, eigv, Kernel = NTK_regression(model, x_train, width)
+    spectrum_list.append(eig)
+    norm_list.append(norm)
+    eigvects_list.append(eigv)
+    H_list.append(Kernel)
+
+    inf = 0
+    i = 0
+    while inf == 0:
+        i = i + 1
+        loss_metric.reset_state()
+        loss_test.reset_state()
+    
+        for (x_train, y_train) in data_train:
+            train(x_train, y_train)
+
+        if i%int(Spacing) == 0:
+            eig, norm, eigv, H = NTK_regression(model, x_train, width)
+            spectrum_list.append(eig)
+            norm_list.append(norm)
+            eigvects_list.append(eigv)
+            H_list.append(H)
+
+            for (x_test, y_test) in data_test:
+                test(x_test, y_test)
+        
+            print("Epoch =", i,
+                "N =", width,
+                "Train Loss :", loss_metric.result().numpy(),
+                "Validation Loss :", loss_test.result().numpy())
+            loss_list_test.append(loss_test.result().numpy())
+            loss_list_train.append(loss_metric.result().numpy())
+
+            if i >= Epochs:
+                break
+
+    return np.asarray(spectrum_list), np.asarray(loss_list_test), np.asarray(loss_list_train), (model), np.asarray(norm_list), np.asarray(eigvects_list), np.asarray(H_list)
+
+def ensemble(Epochs, width, M, rescaling):
+    seed_list = np.arange(0, M)*2
+
+    spect_list = np.zeros((M, int(Epochs/Spacing)+1, D_val))
+    loss_train_list = np.zeros((M, int(Epochs/Spacing)))
+    loss_val_list = np.zeros((M, int(Epochs/Spacing)))
+    norm_list = np.zeros((M, int(Epochs/Spacing)+1))
+    eigv_list = np.zeros((M, int(Epochs/Spacing)+1, D_val, D_val))
+    H_list = np.zeros((M, int(Epochs/Spacing)+1, D_val, D_val))
+    output_list = np.zeros((M, D_val, 1))
+
+    for i in range(M):
+        print("Network = ", i+1)
+        spect_list[i,:], loss_val_list[i,:], loss_train_list[i,:], model, norm_list[i, :], eigv_list[i,:], H_list[i, :] = train_loop(Epochs, width, seed_list[i], rescaling)
+        output_list[i,:] = model(x_test, training = False)
+
+    return spect_list, loss_train_list, loss_val_list, norm_list, eigv_list, H_list, output_list
+
+
+N_vals = np.arange(N_min, N_max + 1, N_spacing)
+
+train_points = int(Epochs/Spacing)+1
+
+s = np.zeros((len(N_vals), D_val, train_points))
+eigv_data = np.zeros((len(N_vals), D_val, D_val))
+lv_data = np.zeros((len(N_vals), train_points-1))
+lt_data = np.zeros((len(N_vals), train_points-1))
+norm_data = np.zeros((len(N_vals), train_points))
+output_data = np.zeros((len(N_vals), D_val, 1))
+
+
+for i in tqdm(range(len(N_vals))):
+    s, lv_data,  lt_data, norm_data, eigv, Kernel, outputs = ensemble(Epochs, int(N_vals[i]), Ensemble_size, "Variance")
+
+    np.save(f'Ensemble_Kernel_N={N_vals[i]}', Kernel)
+    np.save(f'Ensemble_Spectrum_N={N_vals[i]}', s)
+    np.save(f'Ensemble_eigenvectors_N={N_vals[i]}', eigv)
+    np.save(f'final_output_N={N_vals[i]}', output_data)
+    np.save(f'Val_loss_N={N_vals[i]}', lv_data)
+    np.save(f'Train_loss_N={N_vals[i]}', lt_data)
+    np.save(f'Norm_N={N_vals[i]}', norm_data)
+
+
+print('Done')
