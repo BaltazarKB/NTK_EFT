@@ -1,0 +1,94 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import pathlib
+from pathlib import Path
+
+kernels = {}
+spectra = {}
+norm = {}
+ft_kernel = {}
+
+N_vals = np.array([100, 1000, 1025, 1050, 1075, 1100, 1125, 1150, 1175, 1200, 1225, 125, 1250, 1275, 1300, 1325, 1350, 1375, 1400, 1425, 1450, 1475,
+                   150, 1500, 1525, 1550, 1575, 1600, 1625, 1650, 1675, 1700, 1725, 175, 1750, 1775, 1800, 1825, 1850, 1875, 1900, 1925,1950, 1975,
+                   200, 2000, 2025, 2050, 2075, 2100, 2125, 2150, 2175, 2200, 2225, 225, 2250, 2275, 2300, 2325, 2350, 2375, 2400, 2425, 2450, 2475,
+                   25, 250, 2500, 275, 300, 325, 350, 375, 400, 425, 450, 475, 50, 500, 525, 550, 575, 600, 625, 650, 675, 700, 725, 75, 750, 775, 800, 
+                   825, 850, 875, 900, 925, 950, 975])
+
+
+j = -1
+for i in Path(r"C:\Users\balta\Downloads\ForwardEquation\lin\Kernel").iterdir():
+    j = j+1
+    if i.is_file():
+        kernels['{0}'.format(N_vals[j])] = np.load(i)
+
+
+j = -1
+for i in Path(r"C:\Users\balta\Downloads\ForwardEquation\lin\FT_Kernel").iterdir():
+    j = j+1
+    if i.is_file():
+        ft_kernel['{0}'.format(N_vals[j])] = np.load(i)
+
+j = -1
+for i in Path(r'C:\Users\balta\Downloads\ForwardEquation\lin\Spectrum').iterdir():
+    j = j+1
+    if i.is_file():
+        spectra['{0}'.format(N_vals[j])] = np.load(i)
+
+
+j = -1
+for i in Path(r'C:\Users\balta\Downloads\ForwardEquation\lin\Norm').iterdir():
+    j = j+1
+    if i.is_file():
+        norm['{0}'.format(N_vals[j])] = np.load(i)
+
+N_vals = np.array([100, 1000, 1025, 1050, 1075, 1100, 1125, 1150, 1175, 1200, 1225, 125, 1250, 1275, 1300, 1325, 1350, 1375, 1400, 1425, 1450, 1475,
+                   150, 1500, 1525, 1550, 1575, 1600, 1625, 1650, 1675, 1700, 1725, 175, 1750, 1775, 1800, 1825, 1850, 1875, 1900, 1925,1950, 1975,
+                   200, 2000, 2025, 2050, 2075, 2100, 2125, 2150, 2175, 2200, 2225, 225, 2250, 2275, 2300, 2325, 2350, 2375, 2400, 2425, 2450, 2475,
+                   25, 250, 2500, 275, 300, 325, 350, 375, 400, 425, 450, 475, 50, 500, 525, 550, 575, 600, 625, 650, 675, 700, 725, 75, 750, 775, 800, 
+                   825, 850, 875, 900, 925, 950, 975])
+
+kernel_vals = np.zeros((len(N_vals), 20, 10, 10))
+ft_ntk_vals = np.zeros((len(N_vals), 10, 10))
+spectra_vals = np.zeros((len(N_vals), 20, 10))
+norm_vals = np.zeros((len(N_vals), 20))
+
+j = -1         
+for values in (kernels.values()):
+    j = j+1
+    kernel_vals[j,:] = np.array(values)
+
+j = -1         
+for values in (ft_kernel.values()):
+    j = j+1
+    ft_ntk_vals[j,:] = np.array(values)
+
+j = -1
+for vals in spectra.values():
+    j = j+1
+    spectra_vals[j,:] = np.array(vals)
+
+j = -1
+for vals in norm.values():
+    j = j+1
+    norm_vals[j,:] = np.array(vals)
+
+
+plt.errorbar(np.sort(N_vals), np.mean(norm_vals[np.argsort(N_vals)], axis =1), 
+             np.std(norm_vals[np.argsort(N_vals)], axis = 1)/np.sqrt(20), label = 'Emp.')
+ft_norm = np.zeros(100)
+for i in range(100):
+    ft_norm[i] = np.linalg.norm(ft_ntk_vals[i])
+
+plt.plot(N_vals, ft_norm, '.', label = 'FT')
+plt.xlabel('N')
+plt.ylabel('Norm')
+plt.title('Norm of the empirical and field theoretic NTKs (linear)')
+plt.legend()
+plt.show()
+
+plt.title('Variance of the ensemble norm (linear)')
+plt.loglog(np.arange(25, 2501, 25), np.std(norm_vals[np.argsort(N_vals)], axis = 1)**2)
+plt.xlabel('N')
+plt.ylabel('Variance of the NTK Norm')
+plt.show()
+
