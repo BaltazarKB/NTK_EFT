@@ -1,0 +1,336 @@
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import scipy
+from tqdm import tqdm
+from scipy import stats
+
+#### Def Architecure
+Input_dim = 1
+Output_dim = 1
+Legendre_order = 3
+D = 10                   # Data set size
+n = D
+batch = n
+N_ensemble = 20          # Ensemble Size
+Epochs = 1
+Spacing = 1
+dist_mean = 0
+dist_variance = 1
+loss_val = 0.01
+
+n_min = 25
+n_max = 2501
+n_step = 25
+
+N_vals = np.arange(n_min, n_max, n_step)
+
+tf.keras.backend.set_floatx('float64')
+
+#### Get Data
+tf.random.set_seed(100)
+
+x_train = tf.random.uniform((n, Input_dim),-1, 1)
+y_train = scipy.special.eval_legendre(Legendre_order, x_train) + tf.random.uniform(x_train.shape,-1, 1)/50
+
+print(x_train)
+data_train = tf.data.Dataset.from_tensor_slices((x_train, y_train)).batch(batch)
+
+x_test = tf.random.uniform((n, Input_dim),-1, 1)
+y_test = scipy.special.eval_legendre(Legendre_order, x_test)
+
+data_test = tf.data.Dataset.from_tensor_slices((x_test, y_test))
+
+
+def get_model_rescaled_variance(width, Seed):
+    Seed = int(Seed)
+
+    loss_fn = tf.keras.losses.MeanSquaredError()
+    opt = tf.keras.optimizers.SGD(learning_rate = 0.001, momentum = 0.0)
+
+    loss_metric = tf.keras.metrics.Mean()
+    accuracy = tf.keras.metrics.MeanSquaredError()
+
+    loss_test = tf.keras.metrics.Mean()
+    accuracy_test = tf.keras.metrics.MeanSquaredError()
+
+
+    initializer = tf.keras.initializers.RandomNormal(mean = dist_mean, 
+                                                     stddev = np.sqrt(dist_variance),
+                                                     seed = tf.keras.random.SeedGenerator(Seed)
+                                                     )
+    
+    initializer2 = tf.keras.initializers.RandomNormal(mean = dist_mean, 
+                                                     stddev = np.sqrt(dist_variance/width),
+                                                     seed = tf.keras.random.SeedGenerator(Seed+10))
+                                                     
+
+
+    model = tf.keras.models.Sequential()
+    model.add(tf.keras.layers.Dense(width,
+                                    input_shape = (Input_dim, ), 
+                                    activation='selu', 
+                                    kernel_initializer = initializer, # tf.keras.initializers.LecunNormal(seed = tf.keras.random.SeedGenerator(1))
+                                    dtype = tf.float64
+                                    ))
+
+    model.add(tf.keras.layers.Dense(Output_dim,
+                                    input_shape = (width, ),
+                                    activation = None,
+                                    kernel_initializer = initializer2, #  tf.keras.initializers.LecunNormal(seed = tf.keras.random.SeedGenerator(2))
+                                    dtype = tf.float64
+                                    ))
+    
+    
+    return model, loss_fn, opt, loss_metric, loss_test
+
+
+def NTK_regression(model, x, width):
+
+        with tf.GradientTape(persistent=True) as tape:
+            y = model(x)
+
+        grad = tape.jacobian(y, model.trainable_weights)
+
+        grad_new = []
+
+        for i in range(len(grad)):
+            grad_new.append(tf.squeeze(grad[i]))
+        
+        grad_new[-1] = tf.expand_dims(grad_new[-1], axis = 1)
+        grad = np.array(tf.concat(grad_new, 1))
+
+
+        Kernel = grad@(grad.T)
+        Kernel = Kernel/width
+
+        if scipy.linalg.issymmetric(Kernel) == False:
+            raise ValueError("Kernel is not symmetric") 
+
+        norm = np.linalg.norm(Kernel)
+        eigvals, eigvects = scipy.linalg.eigh(Kernel)
+
+        ind = np.flip(np.argsort(eigvals))
+
+        eigvects = eigvects[ind]
+        eigvals = np.flip(np.sort(eigvals))
+    
+        return eigvals, norm, eigvects, Kernel
+
+def train_loop(Epochs, width, seed, rescaling):
+    
+    seed = int(seed)
+
+    if rescaling == "Variance":
+        model, loss_fn, opt, loss_metric, loss_test = get_model_rescaled_variance(width, seed)
+
+    else:
+        raise ValueError("rescaling must be set to Variance or Weights")
+
+    spectrum_list = []
+    loss_list_test = []
+    loss_list_train = []
+    norm_list = []
+    eigvects_list = []
+    Kernel_list = []
+
+    @tf.function
+    def test(x_test, y_test):
+        output = model(x_test, training = False)
+        test_loss = loss_fn(y_test, output)
+
+        loss_test(test_loss)
+
+    @tf.function
+    def train(x_train, y_train):
+        with tf.GradientTape() as g:
+            pred = model(x_train, training = True)
+            loss = loss_fn(y_train, pred)
+        
+        grad = g.gradient(loss, model.trainable_variables)
+        opt.apply_gradients(zip(grad, model.trainable_variables))
+
+        loss_metric(loss)  
+
+    for (x_train, y_train) in data_train:
+            print('Init')
+
+    eig, norm, eigv, Kernel = NTK_regression(model, x_train, width)
+    spectrum_list.append(eig)
+    norm_list.append(norm)
+    eigvects_list.append(eigv)
+    Kernel_list.append(Kernel)
+
+    inf = 0
+    i = 0
+    while inf == 0:
+        i = i + 1
+        loss_metric.reset_state()
+        loss_test.reset_state()
+    
+        for (x_train, y_train) in data_train:
+            train(x_train, y_train)
+
+        if i%int(Spacing) == 0:
+            eig, norm, eigv, Kernel = NTK_regression(model, x_train, width)
+            spectrum_list.append(eig)
+            norm_list.append(norm)
+            eigvects_list.append(eigv)
+            Kernel_list.append(Kernel)
+
+
+            for (x_test, y_test) in data_test:
+                test(x_test, y_test)
+                
+            loss_list_test.append(loss_test.result().numpy())
+            loss_list_train.append(loss_metric.result().numpy())
+
+            if i >= Epochs:
+                break
+
+    
+    return np.asarray(spectrum_list), np.asarray(loss_list_test), np.asarray(loss_list_train), (model), np.asarray(norm_list), np.asarray(eigvects_list), np.asarray(Kernel_list)
+
+def get_kernel(n, N_ensemble):
+    M = N_ensemble
+
+    spect_list = np.zeros((M, int(Epochs/Spacing)+1, D))
+    loss_train_list = np.zeros((M, int(Epochs/Spacing)))
+    loss_val_list = np.zeros((M, int(Epochs/Spacing)))
+    norm_list = np.zeros((M, int(Epochs/Spacing)+1))
+    eigv_list = np.zeros((M, int(Epochs/Spacing)+1, D, D))
+    H_list = np.zeros((M, int(Epochs/Spacing)+1, D, D))
+    output_list = np.zeros((M, D, 1))
+
+    for i in range(M):
+        print("Network = ", i+1)
+        spect_list[i,:], loss_val_list[i,:], loss_train_list[i,:], model, norm_list[i, :], eigv_list[i,:], H_list[i, :] = train_loop(Epochs, n, i, 'Variance')
+        output_list[i,:] = model(x_test, training = False)
+
+    return np.asarray(H_list), np.asarray(norm_list), np.asarray(spect_list)
+
+
+def relu_helper(x):
+    return np.piecewise(x, [x < 0, x > 0], [lambda x : 0, lambda x : x])
+    
+def d_relu_helper(x):
+    return np.piecewise(x, [x < 0, x > 0], [lambda x : 0, lambda x : 1])
+
+def celu_helper(x):
+    return np.piecewise(x, [x < 0, x > 0], [lambda x : 1.05070098*1.67326324*(np.exp(x)-1), lambda x : 1.05070098*x])
+    
+def d_celu_helper(x):
+    return np.piecewise(x, [x < 0, x > 0], [lambda x : 1.05070098*1.67326324*np.exp(x), lambda x : 1.05070098*x**0])
+
+def MC_Gaussian(f, cov, mu, N):
+    np.random.seed(100)
+    x = stats.norm.rvs(loc = mu, scale = np.sqrt(cov), size = N)
+    return np.sum(f(x))/N
+
+def MC_DoubleGaussian(f1, f2, cov, mu, N):
+    np.random.seed(100)
+    x = stats.norm.rvs(loc = mu, scale = np.sqrt(cov), size = N)
+    return np.sum(f1(x)*f2(x))/N
+
+def MC_MultiGaussian(f, cov, mu, N):
+    np.random.seed(100)
+    x = np.random.multivariate_normal(mu, cov, N)  
+    return np.sum(f(x), axis = 0)/(N)
+
+def MC_DoubleMultiGaussian(f1, f2, cov, mu, N):
+    np.random.seed(100)
+    x = np.random.multivariate_normal(mu, cov, (2, N)) 
+    integrand = f1(x[0])*f2(x[1])
+    return np.sum(integrand)/N
+
+def compare(N):
+
+
+    Theta, norm_dist, eig_dist = get_kernel(N, N_ensemble)
+
+    avg_theta = np.mean(Theta, axis = 0)
+    init_theta_mean = avg_theta[0]
+
+    tf.keras.backend.set_floatx('float64')
+
+    tf.random.set_seed(100)
+    n0 = 1
+
+    lw = 1
+    lb = 0
+    Cb = 0
+    dim = 1
+    Cw = 1
+
+    x1 = x_train.numpy()
+
+    G0 = Cb + Cw*np.dot(x1, x1.T)/n0
+
+    mu = np.zeros(D)
+    covariance = np.eye(D)
+
+
+    f = celu_helper
+    d = d_celu_helper
+
+    mu = np.zeros(2)
+
+    #f = lambda x: x
+    #d = lambda x: x**0
+
+
+    M = 1000000
+    exp = np.zeros((D, D))
+    deriv_exp =  np.zeros((D, D))
+
+    covariance = G0
+    for i in tqdm(range(D)):
+        for j in range(D):
+            if i == j:
+                exp[i, j] = MC_DoubleGaussian(f, f, covariance[i, j], mu[0], M)
+                deriv_exp[i, j] = MC_DoubleGaussian(d, d, covariance[i, j], mu[0], M)
+
+            else:             
+                in_cov = [[covariance[i, i], covariance[i, j]], [covariance[j, i], covariance[j, j]]]
+                exp[i,j] = MC_DoubleMultiGaussian(f, f, in_cov, mu, M)/2
+                deriv_exp[i,j] = MC_DoubleMultiGaussian(d, d, in_cov, mu, M)/2
+
+
+    f = lambda x: x
+    d = lambda x: x**0
+
+    exp1 = np.zeros((D, D))
+    deriv_exp1 =  np.zeros((D, D))
+    #covariance = 9.973576e-07*G0/n1
+    covariance = exp*(Cw/N) #+ Cb
+    for i in tqdm(range(D)):
+        for j in range(D):
+            if i == j:
+                exp1[i, j] = MC_DoubleGaussian(f, f, covariance[i, j], mu[0], M)
+                deriv_exp1[i, j] = MC_DoubleGaussian(d, d, covariance[i, j], mu[0], M)
+
+            else:
+                in_cov = [[covariance[i, i], covariance[i, j]], [covariance[j, i], covariance[j, j]]]
+                exp1[i,j] = MC_DoubleMultiGaussian(f, f, in_cov, mu, M)/2
+                deriv_exp1[i,j] = MC_DoubleMultiGaussian(d, d, in_cov, mu, M)/2
+
+    H0 = np.asarray(lb +  lw*np.dot(x1, x1.T)/n0).astype('float64')
+    H1 = np.asarray(lb + (lw)*exp/N + (Cw)*deriv_exp*H0).astype('float64')
+    H2 = np.asarray(lb + (lw)*exp1/N + (Cw)*deriv_exp1*H1).astype('float64')
+
+
+    print(np.linalg.norm(H2), np.linalg.norm(init_theta_mean))
+    #print(np.linalg.eigvals(H2), np.linalg.eigvals(init_theta_mean))
+
+    return norm_dist[:,0], eig_dist[:,0], Theta[:,0,:], H2
+
+#N_low_vals = np.arange(10, 100, 10)
+#N_vals = np.concatenate((N_low_vals, N_vals))
+
+for i in tqdm(range(len(N_vals))):
+    norm_dist, eig_dist, H, H_ft= compare(N_vals[i])
+
+    np.save(f'FT_Kernel_N={N_vals[i]}', H_ft)
+    np.save(f'Ensemble_Kernel_N={N_vals[i]}', H)
+    np.save(f'Ensemble_Spectrum_N={N_vals[i]}', eig_dist)
+    np.save(f'Ensemble_Norm_N={N_vals[i]}', norm_dist)
